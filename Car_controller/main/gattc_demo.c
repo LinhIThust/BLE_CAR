@@ -30,7 +30,7 @@
 #include "esp_gatt_common_api.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
-
+#include "driver/gpio.h"
 #define GATTC_TAG "GATTC_DEMO"
 #define REMOTE_SERVICE_UUID        0x00FF
 #define REMOTE_NOTIFY_CHAR_UUID    0xFF01
@@ -49,6 +49,71 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
 static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 
+//button
+#define BUTTON_1_GPIO        6
+#define BUTTON_2_GPIO        7
+#define BUTTON_3_GPIO        8
+#define BUTTON_4_GPIO        9
+#define GPIO_DIFF            BUTTON_1_GPIO
+#define GPIO_INPUT_PIN_SEL  (1ULL<<BUTTON_1_GPIO|1ULL<<BUTTON_2_GPIO|1ULL<<BUTTON_3_GPIO|1ULL<<BUTTON_4_GPIO)
+
+uint16_t interrupt_count =   0;
+bool button_state        =   false;
+QueueHandle_t gpio_evt_queue = NULL;
+static void IRAM_ATTR gpio_isr_handler(void* arg)
+{
+    uint32_t gpio_num = (uint32_t) arg;
+    if (xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL) != pdPASS) {
+    }
+    
+}
+
+void control_task(void *arg) {
+    uint32_t gpio_num;
+    int current_status[4] = {-1,-1,-1,-1};
+    for (;;) {
+        if (xQueueReceive(gpio_evt_queue, &gpio_num, portMAX_DELAY)) {
+            int next = gpio_get_level(gpio_num);
+            if( next != current_status[gpio_num-GPIO_DIFF]){
+                printf("GPIO[%"PRIu32"] intr, val: %d\n", gpio_num, next);
+                current_status[gpio_num-GPIO_DIFF] = next;
+            }
+        }
+    }
+}
+
+static void esp_button_init();
+static void ble_config(void);
+
+static void esp_button_init() {
+    //zero-initialize the config structure.
+    gpio_config_t io_conf = {};
+    //disable interrupt
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    //interrupt of rising edge
+    io_conf.intr_type = GPIO_INTR_ANYEDGE;
+    //bit mask of the pins, use GPIO4/5 here
+    io_conf.pin_bit_mask = GPIO_INPUT_PIN_SEL;
+    //set as input mode
+    io_conf.mode = GPIO_MODE_INPUT;
+    //enable pull-up mode
+    io_conf.pull_up_en = 1;
+    io_conf.pull_down_en = 0;
+
+    gpio_config(&io_conf);
+
+    //create a queue to handle gpio event from isr
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    //start gpio task
+    //install gpio isr service
+    gpio_install_isr_service(0);
+    //hook isr handler for specific gpio pin
+    gpio_isr_handler_add(BUTTON_1_GPIO, gpio_isr_handler, (void*) BUTTON_1_GPIO);
+    gpio_isr_handler_add(BUTTON_2_GPIO, gpio_isr_handler, (void*) BUTTON_2_GPIO);
+    gpio_isr_handler_add(BUTTON_3_GPIO, gpio_isr_handler, (void*) BUTTON_3_GPIO);
+    gpio_isr_handler_add(BUTTON_4_GPIO, gpio_isr_handler, (void*) BUTTON_4_GPIO);
+
+}
 
 static esp_bt_uuid_t remote_filter_service_uuid = {
     .len = ESP_UUID_LEN_16,
@@ -444,26 +509,8 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
     } while (0);
 }
 
-void app_main(void)
-{
-    // Initialize NVS.
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK( ret );
-
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
-
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ret = esp_bt_controller_init(&bt_cfg);
-    if (ret) {
-        ESP_LOGE(GATTC_TAG, "%s initialize controller failed: %s", __func__, esp_err_to_name(ret));
-        return;
-    }
-
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+static void ble_config(void){
+    esp_err_t ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (ret) {
         ESP_LOGE(GATTC_TAG, "%s enable controller failed: %s", __func__, esp_err_to_name(ret));
         return;
@@ -504,5 +551,30 @@ void app_main(void)
     if (local_mtu_ret){
         ESP_LOGE(GATTC_TAG, "set local  MTU failed, error code = %x", local_mtu_ret);
     }
+}
+
+void app_main(void)
+{
+    // Init button
+    esp_button_init();
+    // Initialize NVS.
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK( ret );
+
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret) {
+        ESP_LOGE(GATTC_TAG, "%s initialize controller failed: %s", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    ble_config();
+    xTaskCreate(control_task, "control_task", 4096, NULL, 5, NULL);
 
 }
