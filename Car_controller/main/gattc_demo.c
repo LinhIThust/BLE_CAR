@@ -60,6 +60,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 uint16_t interrupt_count =   0;
 bool button_state        =   false;
 QueueHandle_t gpio_evt_queue = NULL;
+uint8_t g_gattc_if =0;
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     uint32_t gpio_num = (uint32_t) arg;
@@ -68,19 +69,6 @@ static void IRAM_ATTR gpio_isr_handler(void* arg)
     
 }
 
-void control_task(void *arg) {
-    uint32_t gpio_num;
-    int current_status[4] = {-1,-1,-1,-1};
-    for (;;) {
-        if (xQueueReceive(gpio_evt_queue, &gpio_num, portMAX_DELAY)) {
-            int next = gpio_get_level(gpio_num);
-            if( next != current_status[gpio_num-GPIO_DIFF]){
-                printf("GPIO[%"PRIu32"] intr, val: %d\n", gpio_num, next);
-                current_status[gpio_num-GPIO_DIFF] = next;
-            }
-        }
-    }
-}
 
 static void esp_button_init();
 static void ble_config(void);
@@ -158,6 +146,29 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM] = {
     },
 };
 
+void control_task(void *arg) {
+    uint32_t gpio_num;
+    int current_status[4] = {-1,-1,-1,-1};
+    uint8_t write_char_data[2] ={0x00,0x00}; //index: 0:pin, 1:value
+    for (;;) {
+        if (xQueueReceive(gpio_evt_queue, &gpio_num, portMAX_DELAY)) {
+            int next = gpio_get_level(gpio_num);
+            if( next != current_status[gpio_num-GPIO_DIFF]){
+                printf("GPIO[%"PRIu32"] intr, val: %d\n", gpio_num, next);
+                write_char_data[0] = gpio_num;
+                write_char_data[1] = next;
+                esp_ble_gattc_write_char( g_gattc_if,
+                    gl_profile_tab[PROFILE_A_APP_ID].conn_id,
+                    gl_profile_tab[PROFILE_A_APP_ID].char_handle,
+                    sizeof(write_char_data),
+                    write_char_data,
+                    ESP_GATT_WRITE_TYPE_RSP,
+                    ESP_GATT_AUTH_REQ_NONE);
+                current_status[gpio_num-GPIO_DIFF] = next;
+            }
+        }
+    }
+}
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
 {
     esp_ble_gattc_cb_param_t *p_data = (esp_ble_gattc_cb_param_t *)param;
@@ -172,6 +183,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         break;
     case ESP_GATTC_CONNECT_EVT:{
         ESP_LOGI(GATTC_TAG, "ESP_GATTC_CONNECT_EVT conn_id %d, if %d", p_data->connect.conn_id, gattc_if);
+        g_gattc_if = gattc_if;
         gl_profile_tab[PROFILE_A_APP_ID].conn_id = p_data->connect.conn_id;
         memcpy(gl_profile_tab[PROFILE_A_APP_ID].remote_bda, p_data->connect.remote_bda, sizeof(esp_bd_addr_t));
         ESP_LOGI(GATTC_TAG, "REMOTE BDA:");
