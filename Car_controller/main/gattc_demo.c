@@ -37,6 +37,7 @@
 #define PROFILE_NUM      1
 #define PROFILE_A_APP_ID 0
 #define INVALID_HANDLE   0
+#define SCAN_DURATION 30
 
 static const char remote_device_name[] = "SU_CAR";
 static bool connect    = false;
@@ -419,6 +420,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         connect = false;
         get_server = false;
         ESP_LOGI(GATTC_TAG, "ESP_GATTC_DISCONNECT_EVT, reason = %d", p_data->disconnect.reason);
+        esp_ble_gap_start_scanning(SCAN_DURATION);
         break;
     default:
         break;
@@ -432,8 +434,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     switch (event) {
     case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT: {
         //the unit of the duration is second
-        uint32_t duration = 30;
-        esp_ble_gap_start_scanning(duration);
+        esp_ble_gap_start_scanning(SCAN_DURATION);
         break;
     }
     case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
