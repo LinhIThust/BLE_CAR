@@ -56,7 +56,8 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 #define BUTTON_4_GPIO        9
 #define GPIO_DIFF            BUTTON_1_GPIO
 #define GPIO_INPUT_PIN_SEL  (1ULL<<BUTTON_1_GPIO|1ULL<<BUTTON_2_GPIO|1ULL<<BUTTON_3_GPIO|1ULL<<BUTTON_4_GPIO)
-
+//led
+#define LED_PIN              5
 uint16_t interrupt_count =   0;
 bool button_state        =   false;
 QueueHandle_t gpio_evt_queue = NULL;
@@ -71,8 +72,17 @@ static void IRAM_ATTR gpio_isr_handler(void* arg)
 
 
 static void esp_button_init();
+static void esp_led_init();
 static void ble_config(void);
 
+static void esp_led_init() {
+    gpio_config_t io_conf = {};
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = (1UL<<LED_PIN);
+    gpio_config(&io_conf);
+    gpio_set_level(LED_PIN,0);
+
+}
 static void esp_button_init() {
     //zero-initialize the config structure.
     gpio_config_t io_conf = {};
@@ -157,6 +167,7 @@ void control_task(void *arg) {
                 printf("GPIO[%"PRIu32"] intr, val: %d\n", gpio_num, next);
                 write_char_data[0] = gpio_num;
                 write_char_data[1] = next;
+                gpio_set_level(LED_PIN,!next);
                 esp_ble_gattc_write_char( g_gattc_if,
                     gl_profile_tab[PROFILE_A_APP_ID].conn_id,
                     gl_profile_tab[PROFILE_A_APP_ID].char_handle,
@@ -169,6 +180,20 @@ void control_task(void *arg) {
         }
     }
 }
+
+void led_task(void *arg) {
+    while (1)
+    {
+        if(!connect) {
+            gpio_set_level(LED_PIN,0);
+            vTaskDelay(50/portTICK_PERIOD_MS);
+            gpio_set_level(LED_PIN,1);
+            vTaskDelay(50/portTICK_PERIOD_MS);
+        }
+        vTaskDelay(50/portTICK_PERIOD_MS);
+    }
+}
+
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
 {
     esp_ble_gattc_cb_param_t *p_data = (esp_ble_gattc_cb_param_t *)param;
@@ -429,6 +454,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             adv_name = esp_ble_resolve_adv_data(scan_result->scan_rst.ble_adv,
                                                 ESP_BLE_AD_TYPE_NAME_CMPL, &adv_name_len);
             ESP_LOGI(GATTC_TAG, "searched Device Name Len %d", adv_name_len);
+           
             esp_log_buffer_char(GATTC_TAG, adv_name, adv_name_len);
 
 #if CONFIG_EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP
@@ -569,6 +595,7 @@ void app_main(void)
 {
     // Init button
     esp_button_init();
+    esp_led_init();
     // Initialize NVS.
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -588,5 +615,6 @@ void app_main(void)
 
     ble_config();
     xTaskCreate(control_task, "control_task", 4096, NULL, 5, NULL);
+    xTaskCreate(led_task, "led_task", 4096, NULL, 5, NULL);
 
 }
