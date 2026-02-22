@@ -31,7 +31,7 @@
 #include "esp_bt_defs.h"
 #include "esp_bt_main.h"
 #include "esp_gatt_common_api.h"
-
+#include "esp_rom_sys.h" 
 #include "sdkconfig.h"
 #include "driver/gpio.h"
 #define GATTS_TAG "GATTS_DEMO"
@@ -40,8 +40,15 @@
 #define M_LED_R_2 7
 #define M_LED_L_1 8
 #define M_LED_L_2 9
-#define BUZZ      1
-#define GPIO_INPUT_PIN_SEL  (1ULL<<M_LED_R_1|1ULL<<M_LED_R_2|1ULL<<M_LED_L_1|1ULL<<M_LED_L_2)
+#define BUZZ      10
+#define GPIO_INPUT_PIN_SEL  (1ULL<<M_LED_R_1|1ULL<<M_LED_R_2|1ULL<<M_LED_L_1|1ULL<<M_LED_L_2 |1ULL<<BUZZ)
+
+//motor
+#define IN1 4
+#define IN2 3
+#define IN3 2
+#define IN4 1
+volatile int motor_dir = 0; // 0 stop, 1 fwd, -1 rev
 ///Declare the static function
 static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
 
@@ -353,8 +360,19 @@ static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_i
     }
     case ESP_GATTS_WRITE_EVT: {
        if (!param->write.is_prep){
-            ESP_LOGI(GATTS_TAG, "RECEIVE: 0x%x  0x%x", param->write.value[0],  param->write.value[1]);
-            gpio_set_level(param->write.value[0],1- param->write.value[1]);
+            uint8_t cmd  = param->write.value[0];
+            uint8_t data = param->write.value[1];
+            ESP_LOGI(GATTS_TAG, "RECEIVE: 0x%x  0x%x",cmd, data);
+            gpio_set_level(cmd,1- data);
+            // gpio_set_level(BUZZ,data);
+            if(cmd == 6) {
+                if(data == 0) motor_dir =1;
+                else motor_dir =0;
+            }
+            if(cmd == 8) {
+                if(data == 0) motor_dir =-1;
+                else motor_dir =0;
+            }
         }
         example_write_event_env(gatts_if, &a_prepare_write_env, param);
         break;
@@ -504,7 +522,69 @@ void init_led()
     gpio_set_level(M_LED_R_2, 0);
     gpio_set_level(M_LED_L_1, 0);
     gpio_set_level(M_LED_L_2, 0);
+    gpio_set_level(BUZZ, 1);
 }
+
+void stepper_gpio_init(void)
+{
+    gpio_config_t io_conf = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL<<IN1) | (1ULL<<IN2) | (1ULL<<IN3) | (1ULL<<IN4),
+        .pull_up_en = 0,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+}
+
+int step_index = 0;
+
+const uint8_t step_seq[4][4] = {
+{1,0,0,0},
+{0,1,0,0},
+{0,0,1,0},
+{0,0,0,1},
+};
+
+void stepper_write(const uint8_t *p)
+{
+    gpio_set_level(IN1, p[0]);
+    gpio_set_level(IN3, p[1]);
+    gpio_set_level(IN2, p[2]);
+    gpio_set_level(IN4, p[3]);
+}
+
+void stepper_step(int dir)
+{
+    static int step = 0;
+    for (int i = 0; i < 3; i++)
+    {
+        /* code */
+        step = (step + dir + 4) % 4;
+        gpio_set_level(IN1, step_seq[step][0]);
+        gpio_set_level(IN2, step_seq[step][1]);
+        gpio_set_level(IN3, step_seq[step][2]);
+        gpio_set_level(IN4, step_seq[step][3]);
+        esp_rom_delay_us(5000); // 5 ms
+    }
+    
+}
+
+void stepper_task(void *arg)
+{
+    stepper_gpio_init();
+    int dir = 1; // 1: thuận, -1: ngược
+
+    while (1) {
+        if(motor_dir != 0) {
+            stepper_step(motor_dir);
+            vTaskDelay(pdMS_TO_TICKS(10)); // chỉnh tốc độ tại đây
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+}
+
 void app_main(void)
 {
     esp_err_t ret;
@@ -515,6 +595,7 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
+    xTaskCreate(stepper_task, "stepper", 2048, NULL, 5, NULL);
     ESP_ERROR_CHECK( ret );
 
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
