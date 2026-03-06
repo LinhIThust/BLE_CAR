@@ -31,6 +31,8 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "driver/gpio.h"
+#include "driver/adc.h"
+#include "esp_adc_cal.h"
 #define GATTC_TAG "GATTC_DEMO"
 #define REMOTE_SERVICE_UUID        0x00FF
 #define REMOTE_NOTIFY_CHAR_UUID    0xFF01
@@ -51,18 +53,35 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 
 //button
-#define BUTTON_1_GPIO        6
-#define BUTTON_2_GPIO        7
-#define BUTTON_3_GPIO        8
-#define BUTTON_4_GPIO        9
+#define BUTTON_1_GPIO        8 //UP
+#define BUTTON_2_GPIO        9 //DOWN
+#define BUTTON_3_GPIO        10 //STOP
+#define BUTTON_JS_1        21
+#define BUTTON_JS_2        20
 #define GPIO_DIFF            BUTTON_1_GPIO
-#define GPIO_INPUT_PIN_SEL  (1ULL<<BUTTON_1_GPIO|1ULL<<BUTTON_2_GPIO|1ULL<<BUTTON_3_GPIO|1ULL<<BUTTON_4_GPIO)
+#define GPIO_INPUT_PIN_SEL  (1ULL<<BUTTON_1_GPIO|1ULL<<BUTTON_2_GPIO|1ULL<<BUTTON_3_GPIO|1ULL<<BUTTON_JS_1|1ULL<<BUTTON_JS_2)
+
+// Joystick ADC channels
+#define JOYSTICK_1_VX       ADC1_CHANNEL_0  // GPIO 0
+#define JOYSTICK_1_VY       ADC1_CHANNEL_1  // GPIO 1
+#define JOYSTICK_2_VX       ADC1_CHANNEL_2  // GPIO 2
+#define JOYSTICK_2_VY       ADC1_CHANNEL_3  // GPIO 3
+
+// ADC configuration
+#define ADC_WIDTH           ADC_WIDTH_BIT_12
+#define ADC_ATTEN           ADC_ATTEN_DB_11
 //led
 #define LED_PIN              5
 uint16_t interrupt_count =   0;
 bool button_state        =   false;
 QueueHandle_t gpio_evt_queue = NULL;
 uint8_t g_gattc_if =0;
+
+// Joystick values
+uint16_t joystick1_vx = 0;
+uint16_t joystick1_vy = 0;
+uint16_t joystick2_vx = 0;
+uint16_t joystick2_vy = 0;
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     uint32_t gpio_num = (uint32_t) arg;
@@ -74,6 +93,7 @@ static void IRAM_ATTR gpio_isr_handler(void* arg)
 
 static void esp_button_init();
 static void esp_led_init();
+static void esp_adc_init();
 static void ble_config(void);
 
 static void esp_led_init() {
@@ -83,6 +103,15 @@ static void esp_led_init() {
     gpio_config(&io_conf);
     gpio_set_level(LED_PIN,0);
 
+}
+
+static void esp_adc_init() {
+    // Configure ADC width and attenuation
+    adc1_config_width(ADC_WIDTH);
+    adc1_config_channel_atten(JOYSTICK_1_VX, ADC_ATTEN);
+    adc1_config_channel_atten(JOYSTICK_1_VY, ADC_ATTEN);
+    adc1_config_channel_atten(JOYSTICK_2_VX, ADC_ATTEN);
+    adc1_config_channel_atten(JOYSTICK_2_VY, ADC_ATTEN);
 }
 static void esp_button_init() {
     //zero-initialize the config structure.
@@ -110,7 +139,8 @@ static void esp_button_init() {
     gpio_isr_handler_add(BUTTON_1_GPIO, gpio_isr_handler, (void*) BUTTON_1_GPIO);
     gpio_isr_handler_add(BUTTON_2_GPIO, gpio_isr_handler, (void*) BUTTON_2_GPIO);
     gpio_isr_handler_add(BUTTON_3_GPIO, gpio_isr_handler, (void*) BUTTON_3_GPIO);
-    gpio_isr_handler_add(BUTTON_4_GPIO, gpio_isr_handler, (void*) BUTTON_4_GPIO);
+    gpio_isr_handler_add(BUTTON_JS_1, gpio_isr_handler, (void*) BUTTON_JS_1);
+    gpio_isr_handler_add(BUTTON_JS_2, gpio_isr_handler, (void*) BUTTON_JS_2);
 
 }
 
@@ -192,6 +222,40 @@ void led_task(void *arg) {
             vTaskDelay(50/portTICK_PERIOD_MS);
         }
         vTaskDelay(50/portTICK_PERIOD_MS);
+    }
+}
+
+void joystick_task(void *arg) {
+    while (1) {
+        // Read joystick ADC values
+        joystick1_vx = adc1_get_raw(JOYSTICK_1_VX);
+        joystick1_vy = adc1_get_raw(JOYSTICK_1_VY);
+        joystick2_vx = adc1_get_raw(JOYSTICK_2_VX);
+        joystick2_vy = adc1_get_raw(JOYSTICK_2_VY);
+        
+        // Print joystick values
+        printf("Joystick 1 - VX: %d, VY: %d | Joystick 2 - VX: %d, VY: %d\n", 
+               joystick1_vx, joystick1_vy, joystick2_vx, joystick2_vy);
+        
+        // Send joystick data via BLE if connected
+        if (connect) {
+            uint8_t joystick_data[8] = {
+                (joystick1_vx >> 8) & 0xFF, joystick1_vx & 0xFF,  // Joystick 1 VX (MSB, LSB)
+                (joystick1_vy >> 8) & 0xFF, joystick1_vy & 0xFF,  // Joystick 1 VY (MSB, LSB)
+                (joystick2_vx >> 8) & 0xFF, joystick2_vx & 0xFF,  // Joystick 2 VX (MSB, LSB)
+                (joystick2_vy >> 8) & 0xFF, joystick2_vy & 0xFF   // Joystick 2 VY (MSB, LSB)
+            };
+            
+            esp_ble_gattc_write_char(g_gattc_if,
+                gl_profile_tab[PROFILE_A_APP_ID].conn_id,
+                gl_profile_tab[PROFILE_A_APP_ID].char_handle,
+                sizeof(joystick_data),
+                joystick_data,
+                ESP_GATT_WRITE_TYPE_NO_RSP,
+                ESP_GATT_AUTH_REQ_NONE);
+        }
+        
+        vTaskDelay(100 / portTICK_PERIOD_MS);  // Read every 100ms
     }
 }
 
@@ -414,7 +478,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             ESP_LOGE(GATTC_TAG, "write char failed, error status = %x", p_data->write.status);
             break;
         }
-        ESP_LOGI(GATTC_TAG, "write char success ");
+        // ESP_LOGI(GATTC_TAG, "write char success ");
         break;
     case ESP_GATTC_DISCONNECT_EVT:
         connect = false;
@@ -594,9 +658,10 @@ static void ble_config(void){
 
 void app_main(void)
 {
-    // Init button
+    // Init peripherals
     esp_button_init();
     esp_led_init();
+    esp_adc_init();
     // Initialize NVS.
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -617,5 +682,6 @@ void app_main(void)
     ble_config();
     xTaskCreate(control_task, "control_task", 4096, NULL, 5, NULL);
     xTaskCreate(led_task, "led_task", 4096, NULL, 5, NULL);
+    xTaskCreate(joystick_task, "joystick_task", 4096, NULL, 5, NULL);
 
 }
