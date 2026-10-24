@@ -36,19 +36,90 @@
 #include "driver/gpio.h"
 #define GATTS_TAG "GATTS_DEMO"
 //Define motor pin
-#define M_LED_R_1 6
-#define M_LED_R_2 7
-#define M_LED_L_1 8
-#define M_LED_L_2 9
+#define M_LED_R_1 1
+#define M_LED_R_2 2
+#define M_LED_L_1 3
+#define M_LED_L_2 4
 #define BUZZ      10
 #define GPIO_INPUT_PIN_SEL  (1ULL<<M_LED_R_1|1ULL<<M_LED_R_2|1ULL<<M_LED_L_1|1ULL<<M_LED_L_2 |1ULL<<BUZZ)
 
 //motor
-#define IN1 4
-#define IN2 3
-#define IN3 2
-#define IN4 1
+#define IN1 5
+#define IN2 6
+#define IN3 7
+#define IN4 8
 volatile int motor_dir = 0; // 0 stop, 1 fwd, -1 rev
+
+// Joystick baseline values (center positions)
+#define JOYSTICK_CENTER 2048  // 12-bit ADC center value (4096/2)
+#define JOYSTICK_DEADZONE 200 // Deadzone around center to prevent jitter
+#define JOYSTICK_MAX_SPEED 100 // Maximum speed value
+
+// Joystick direction variables
+volatile int joystick1_x = 0; // -100 to +100 (left to right)
+volatile int joystick1_y = 0; // -100 to +100 (backward to forward)
+volatile int joystick2_x = 0; // -100 to +100 (left to right)
+volatile int joystick2_y = 0; // -100 to +100 (backward to forward)
+
+void process_joystick_data(uint16_t j1_vx, uint16_t j1_vy, uint16_t j2_vx, uint16_t j2_vy) {
+    // Convert ADC values to -100 to +100 range with deadzone
+    // VX: Left/Right movement
+    if (j1_vx < (JOYSTICK_CENTER - JOYSTICK_DEADZONE)) {
+        joystick1_x = ((int)j1_vx - JOYSTICK_CENTER) * 100 / JOYSTICK_CENTER;
+    } else if (j1_vx > (JOYSTICK_CENTER + JOYSTICK_DEADZONE)) {
+        joystick1_x = ((int)j1_vx - JOYSTICK_CENTER) * 100 / JOYSTICK_CENTER;
+    } else {
+        joystick1_x = 0;
+    }
+
+    // VY: Forward/Backward movement
+    if (j1_vy < (JOYSTICK_CENTER - JOYSTICK_DEADZONE)) {
+        joystick1_y = ((int)j1_vy - JOYSTICK_CENTER) * 100 / JOYSTICK_CENTER;
+    } else if (j1_vy > (JOYSTICK_CENTER + JOYSTICK_DEADZONE)) {
+        joystick1_y = ((int)j1_vy - JOYSTICK_CENTER) * 100 / JOYSTICK_CENTER;
+    } else {
+        joystick1_y = 0;
+    }
+
+    // Joystick 2
+    if (j2_vx < (JOYSTICK_CENTER - JOYSTICK_DEADZONE)) {
+        joystick2_x = ((int)j2_vx - JOYSTICK_CENTER) * 100 / JOYSTICK_CENTER;
+    } else if (j2_vx > (JOYSTICK_CENTER + JOYSTICK_DEADZONE)) {
+        joystick2_x = ((int)j2_vx - JOYSTICK_CENTER) * 100 / JOYSTICK_CENTER;
+    } else {
+        joystick2_x = 0;
+    }
+
+    if (j2_vy < (JOYSTICK_CENTER - JOYSTICK_DEADZONE)) {
+        joystick2_y = ((int)j2_vy - JOYSTICK_CENTER) * 100 / JOYSTICK_CENTER;
+    } else if (j2_vy > (JOYSTICK_CENTER + JOYSTICK_DEADZONE)) {
+        joystick2_y = ((int)j2_vy - JOYSTICK_CENTER) * 100 / JOYSTICK_CENTER;
+    } else {
+        joystick2_y = 0;
+    }
+
+    // Determine motor direction based on joystick 1 (primary control)
+    // Use Y-axis for forward/backward, X-axis for turning
+    if (abs(joystick1_y) > 10) { // Only move if significant Y movement
+        if (joystick1_y > 0) {
+            motor_dir = 1; // Forward
+        } else {
+            motor_dir = -1; // Backward
+        }
+    } else {
+        motor_dir = 0; // Stop
+    }
+
+    // Print joystick values for debugging
+    ESP_LOGI(GATTS_TAG, "J1: X=%d Y=%d | J2: X=%d Y=%d | Motor: %d", 
+             joystick1_x, joystick1_y, joystick2_x, joystick2_y, motor_dir);
+}
+
+void calibrate_joystick_center() {
+    // This function can be called to set custom center values if needed
+    // For now, we use the default center value of 2048
+    ESP_LOGI(GATTS_TAG, "Joystick center calibrated to: %d", JOYSTICK_CENTER);
+}
 ///Declare the static function
 static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
 
@@ -360,18 +431,33 @@ static void gatts_profile_a_event_handler(esp_gatts_cb_event_t event, esp_gatt_i
     }
     case ESP_GATTS_WRITE_EVT: {
        if (!param->write.is_prep){
-            uint8_t cmd  = param->write.value[0];
-            uint8_t data = param->write.value[1];
-            ESP_LOGI(GATTS_TAG, "RECEIVE: 0x%x  0x%x",cmd, data);
-            gpio_set_level(cmd,1- data);
-            // gpio_set_level(BUZZ,data);
-            if(cmd == 6) {
-                if(data == 0) motor_dir =1;
-                else motor_dir =0;
-            }
-            if(cmd == 8) {
-                if(data == 0) motor_dir =-1;
-                else motor_dir =0;
+            if (param->write.len == 2) {
+                // Handle button data (legacy)
+                uint8_t cmd  = param->write.value[0];
+                uint8_t data = param->write.value[1];
+                ESP_LOGI(GATTS_TAG, "BUTTON: 0x%x  0x%x", cmd, data);
+                gpio_set_level(cmd, 1 - data);
+                if(cmd == 6) {
+                    if(data == 0) motor_dir = 1;
+                    else motor_dir = 0;
+                }
+                if(cmd == 8) {
+                    if(data == 0) motor_dir = -1;
+                    else motor_dir = 0;
+                }
+            } else if (param->write.len == 8) {
+                // Handle joystick data (8 bytes)
+                uint16_t j1_vx = (param->write.value[0] << 8) | param->write.value[1];
+                uint16_t j1_vy = (param->write.value[2] << 8) | param->write.value[3];
+                uint16_t j2_vx = (param->write.value[4] << 8) | param->write.value[5];
+                uint16_t j2_vy = (param->write.value[6] << 8) | param->write.value[7];
+                
+                ESP_LOGI(GATTS_TAG, "JOYSTICK RAW: J1_VX=%d J1_VY=%d J2_VX=%d J2_VY=%d", 
+                         j1_vx, j1_vy, j2_vx, j2_vy);
+                
+                process_joystick_data(j1_vx, j1_vy, j2_vx, j2_vy);
+            } else {
+                ESP_LOGW(GATTS_TAG, "Unknown data length: %d", param->write.len);
             }
         }
         example_write_event_env(gatts_if, &a_prepare_write_env, param);
@@ -589,6 +675,8 @@ void app_main(void)
 {
     esp_err_t ret;
     init_led();
+    calibrate_joystick_center(); // Initialize joystick calibration
+    
     // Initialize NVS.
     ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
